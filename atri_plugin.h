@@ -54,11 +54,6 @@ public:
     }
 
 public:
-    ManagedCloneable clone() {
-        return ManagedCloneable(clone_fn(pointer));
-    }
-
-public:
     ManagedCloneable &operator=(const ManagedCloneable &rhs) {
         if (this == &rhs) {
             return *this;
@@ -68,6 +63,11 @@ public:
         this->pointer = rs.value.pointer;
 
         return *this;
+    }
+
+protected:
+    ManagedCloneable clone() {
+        return ManagedCloneable(clone_fn(pointer));
     }
 
 private:
@@ -175,15 +175,19 @@ struct FFIMember {
 
 struct AtriVTable {
     RustManaged (*new_listener_c_func)(bool, bool (*fn)(FFIEvent), uint8_t);
+
     RustManaged (*new_listener_closure)(bool, FFIHandler, uint8_t);
 
     void (*event_intercept)(const void *);
+
     bool (*event_is_intercepted)(const void *);
 
     int64_t (*group_get_id)(const void *);
 
     RustManagedCloneable (*group_message_event_get_group)(const void *);
+
     FFIMessageChain (*group_message_event_get_message)(const void *);
+
     FFIMember (*group_message_event_get_sender)(const void *);
 
     void (*log)(size_t, const void *, uint8_t, RustStr);
@@ -340,7 +344,7 @@ namespace Atri {
         }
 
     private:
-        const char8_t *why;
+        const char8_t *why = nullptr;
     };
 }
 
@@ -352,11 +356,11 @@ namespace message {
     class MessageMetadata {
     public:
         explicit MessageMetadata(FFIMessageMetadata ffi) :
-        seqs(ffi.seqs),
-        rands(ffi.rands),
-        time(ffi.time),
-        sender(ffi.sender),
-        flag(ffi.flag) {
+                seqs(ffi.seqs),
+                rands(ffi.rands),
+                time(ffi.time),
+                sender(ffi.sender),
+                flag(ffi.flag) {
 
         }
 
@@ -383,6 +387,10 @@ namespace contact {
 
     class Group : public Contact, public ManagedCloneable {
     public:
+        ~Group() override {
+            logger::info(u8"group drop");
+        }
+
         explicit Group(RustManagedCloneable rs) : ManagedCloneable(rs) {
 
         }
@@ -393,11 +401,12 @@ namespace contact {
         }
     };
 
-    class Member : public Contact {};
+    class Member : public Contact {
+    };
 
-    class NamedMember: public Member, public ManagedCloneable {
+    class NamedMember : public Member, public ManagedCloneable {
     public:
-        explicit NamedMember(RustManagedCloneable rs): ManagedCloneable(rs) {
+        explicit NamedMember(RustManagedCloneable rs) : ManagedCloneable(rs) {
 
         }
 
@@ -407,7 +416,7 @@ namespace contact {
         }
     };
 
-    class AnonymousMember: public Member, public ManagedCloneable {
+    class AnonymousMember : public Member, public ManagedCloneable {
     public:
         explicit AnonymousMember(RustManagedCloneable rs) : ManagedCloneable(rs) {
 
@@ -452,7 +461,15 @@ namespace event {
 
     public:
         virtual contact::Contact *contact() = 0;
+
         virtual contact::Contact *sender() = 0;
+    };
+
+    class ClientLoginEvent : public Event, public ManagedCloneable {
+    public:
+        explicit ClientLoginEvent(FFIEvent e) : Event(e.intercepted), ManagedCloneable(e.base) {
+
+        }
     };
 
     class GroupMessageEvent : public MessageEvent, public ManagedCloneable {
@@ -483,8 +500,20 @@ namespace event {
         }
     };
 
-    class FriendMessageEvent : MessageEvent {
+    class FriendMessageEvent : public MessageEvent, public ManagedCloneable {
+    public:
+        explicit FriendMessageEvent(FFIEvent e) : MessageEvent(e.intercepted), ManagedCloneable(e.base) {
 
+        }
+
+    public:
+        contact::Contact *contact() override {
+            return new contact::Group({});
+        }
+
+        contact::Contact *sender() override {
+            return new contact::Group({});
+        }
     };
 
     class ListenerGuard : Managed {
@@ -509,19 +538,29 @@ namespace event {
 
     class Listener {
     public:
+        /***
+         * listen to a event
+         * @tparam E: event type
+         * @param fn: event handler, return false to close this listener
+         * @return a listener guard, which can be use to stop listen events
+         */
         template<class E>
-        static ListenerGuard *listening_on(std::function<bool(E)> fn) {
+        static ListenerGuard *listening_on(std::function<bool(E *)> fn) {
             static_assert(std::is_convertible<E *, Event *>());
-            auto raw = [fn](FFIEvent ffi) -> bool {
+            auto new_fn = new std::function<bool(FFIEvent)>;
+            *new_fn = [fn](FFIEvent ffi) -> bool {
                 Event *e;
 
                 switch (ffi.type) {
-                    case 1: {
+                    case 0:
+                        e = new ClientLoginEvent(ffi);
+                        break;
+                    case 1:
                         e = new GroupMessageEvent(ffi);
                         break;
-                    }
+
                     default:
-                        ManagedCloneable(ffi.base);
+                        ManagedCloneable(ffi.base); // drop it
                         return true;
                 }
 
@@ -532,7 +571,9 @@ namespace event {
                 }
 
                 try {
-                    return fn(*need);
+                    bool ret = fn(need);
+                    delete need;
+                    return ret;
                 } catch (std::exception &e) {
                     logger::error((const char8_t *) e.what());
 
@@ -540,16 +581,16 @@ namespace event {
                 }
             };
 
-            auto rr = new std::function<bool(FFIEvent)>;
-            *rr = raw;
-
-            RustManaged ma = ATRI_VTABLE.new_listener_closure(true, FFIHandler{
-                    RustManaged{
-                            rr,
-                            drop_closure
-                    }, handle
-            }, 0);
+            RustManaged ma = ATRI_VTABLE.new_listener_closure(true, {{new_fn, drop_closure}, handle}, 0);
             return new ListenerGuard(ma);
+        }
+
+        template<class E>
+        static ListenerGuard *listening_on_always(std::function<void(E *)> fn) {
+            return listening_on<E>([fn](E *e) -> bool {
+                fn(e);
+                return true;
+            });
         }
     };
 }
