@@ -17,7 +17,7 @@ CMakeList.txt:
 cmake_minimum_required(VERSION 3.21)
 project(my_plugin LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 11) # 17/20
+set(CMAKE_CXX_STANDARD 17) # or 20
 set(BUILD_USE_64BITS on)
 
 add_library(my_plugin SHARED plugin.cpp)
