@@ -20,10 +20,6 @@ project(my_plugin LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 11) # 17/20
 set(BUILD_USE_64BITS on)
 
-if(MSVC)
-    add_compile_options(/utf-8) # 使用utf8进行编译
-endif(MSVC)
-
 add_library(my_plugin SHARED plugin.cpp)
 ```
 
@@ -31,21 +27,17 @@ add_library(my_plugin SHARED plugin.cpp)
 ```c++
 #include "includes/atri_plugin.h"
 
-class MyPlugin: public Atri::Plugin {
+class MyPlugin: public atri::Plugin {
 public:
     ~MyPlugin() override {
         delete guard; // 关闭监听器
-        logger::info(u8"插件释放");
+        logger::info("插件释放");
     }
 
 public:
-    const char8_t * name() override {
-        return u8"MyPlugin";
-    }
-
     void enable() override {
-        guard = event::Listener::listening_on<event::GroupMessageEvent>([](event::GroupMessageEvent e) {
-            int64_t id = e.group().id();
+        guard = event::Listener::listening_on<event::GroupMessageEvent>([](event::GroupMessageEvent *e) {
+            int64_t id = e->group().id();
 
             printf("id=%lld\n", id);
             fflush(stdout);
@@ -63,12 +55,12 @@ private:
     event::ListenerGuard *guard = nullptr;
 };
 
-ATRI_PLUGIN(MyPlugin) // 此宏必要, 用于导出插件
+ATRI_PLUGIN(MyPlugin, "插件名称") // 此宏必要, 用于导出插件
 ```
 
 生成构建文件 (以ninja为例, 构建目录为./build): 
 ```commandline
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja
+cmake -S . -B build -G Ninja
 cd build
 ninja
 ```

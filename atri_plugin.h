@@ -13,7 +13,7 @@
 
 #if defined(_WIN64) || defined(__CYGWIN__)
 #ifdef _MSC_VER
-//#pragma execution_character_set("utf-8")
+#pragma execution_character_set("utf-8")
 #define EXPORT __declspec(dllexport)
 #else
 #define EXPORT __attribute__((dllexport))
