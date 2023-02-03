@@ -8,27 +8,97 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <cstring>
+#include <functional>
+
+#if defined(_WIN64) || defined(__CYGWIN__)
+#ifdef _MSC_VER
+//#pragma execution_character_set("utf-8")
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT __attribute__((dllexport))
+#endif
+#else
+#if __GNUC__ >= 4
+#define EXPORT __attribute__((visibility ("default")))
+#else
+#define EXPORT
+#endif
+#endif
+
+#define EXTERN_C extern "C"
+
+#define ATRI_EXPORT EXTERN_C EXPORT
+
+#ifndef CDECL
+#ifdef _MSC_VER
+#define CDECL __cdecl
+#else
+#define CDECL
+#endif
+#endif
+
+#define ATRI_PLUGIN_ABI_VERSION 2
+
+inline namespace atri {
+    inline namespace resource {
+        class ResourceNotAvailable : public std::exception {
+        public:
+            ResourceNotAvailable() = default;
+
+            [[nodiscard]] const char *what() const noexcept override {
+                return "resource not available";
+            }
+        };
+
+        typedef void *AtriHandle;
+        typedef void **AtriPHandle;
+
+        struct AtriHandleWrapper {
+            AtriHandle ptr;
+
+            [[nodiscard]] AtriHandle valid_handle() const {
+                if (ptr) return ptr;
+                else throw ResourceNotAvailable();
+            }
+
+            explicit operator bool() const {
+                return ptr;
+            }
+        };
+    }
+}
 
 struct RustManaged {
     void *pointer;
 
-    void (*drop_fn)(void *);
+    void (CDECL *drop_fn)(void *);
 };
 
 struct RustManagedCloneable {
     RustManaged value;
 
-    RustManagedCloneable (*clone_fn)(const void *);
+    struct RustManagedCloneable (CDECL *clone_fn)(void *);
 };
 
 class Managed {
 public:
-    explicit Managed(RustManaged rs) : pointer(rs.pointer), drop(rs.drop_fn) {
-    }
+    explicit Managed(RustManaged rs) :
+            pointer(rs.pointer),
+            drop(rs.drop_fn) {}
 
     virtual ~Managed() {
-        drop(pointer);
+        if (pointer) {
+            drop(pointer);
+        }
     };
+
+public:
+    Managed(Managed &&r) noexcept:
+            pointer(std::exchange(r.pointer, nullptr)),
+            drop(std::exchange(r.drop, nullptr)) {
+
+    }
 
 protected:
     void *pointer;
@@ -71,25 +141,25 @@ protected:
     }
 
 private:
-    RustManagedCloneable (*clone_fn)(const void *);
+    RustManagedCloneable (CDECL *clone_fn)(void *);
 };
 
 struct RustStr {
-    const char8_t *slice;
-    const size_t len;
+    char *slice;
+    size_t len;
 };
 
-RustStr from_u8str(const char8_t *str) {
-    size_t len = strlen(reinterpret_cast<const char *>(str));
+RustStr from_u8str(const char *str) {
+    size_t len = strlen(str);
     return RustStr{
-            str,
+            (char *) str,
             len
     };
 }
 
-RustStr from_u8string(std::u8string &str) {
+RustStr from_u8string(std::string &str) {
     return RustStr{
-            str.data(),
+            (char *) str.data(),
             str.length(),
     };
 }
@@ -109,9 +179,12 @@ struct RustVec {
 
 struct FFIEvent {
     uint8_t type;
-    const void *intercepted;
+    void *intercepted;
     RustManagedCloneable base;
 };
+
+#define CLIENT_LOGIN 0
+#define GROUP_MESSAGE 1
 
 struct FFIHandler {
     RustManaged closure;
@@ -130,11 +203,15 @@ union MessageElementUnion {
     FFIAt at;
     char at_all[0];
     ManagedCloneable unknown;
+
+    ~MessageElementUnion() = delete;
 };
 
 struct FFIMessageElement {
     uint8_t type;
     MessageElementUnion inner;
+
+    ~FFIMessageElement() = delete;
 };
 
 struct FFIAnonymous {
@@ -171,33 +248,35 @@ struct FFIMember {
     RustManagedCloneable inner;
 };
 
-#define ATRI_EXPORT extern "C" [[maybe_unused]]
-
 struct AtriVTable {
-    RustManaged (*new_listener_c_func)(bool, bool (*fn)(FFIEvent), uint8_t);
+    RustManaged (CDECL *new_listener_c_func)(bool, bool (*fn)(FFIEvent), uint8_t);
 
-    RustManaged (*new_listener_closure)(bool, FFIHandler, uint8_t);
+    RustManaged (CDECL *new_listener_closure)(bool, FFIHandler, uint8_t);
 
-    void (*event_intercept)(const void *);
+    void (CDECL *event_intercept)(void *);
 
-    bool (*event_is_intercepted)(const void *);
+    bool (CDECL *event_is_intercepted)(void *);
 
-    int64_t (*group_get_id)(const void *);
+    int64_t (CDECL *group_get_id)(AtriHandle);
 
-    RustManagedCloneable (*group_message_event_get_group)(const void *);
+    AtriHandle (CDECL *group_clone)(AtriHandle);
 
-    FFIMessageChain (*group_message_event_get_message)(const void *);
+    void (CDECL *group_drop)(AtriHandle);
 
-    FFIMember (*group_message_event_get_sender)(const void *);
+    AtriPHandle (CDECL *group_message_event_get_group)(void *);
 
-    void (*log)(size_t, const void *, uint8_t, RustStr);
+    FFIMessageChain (CDECL *group_message_event_get_message)(void *);
+
+    FFIMember (CDECL *group_message_event_get_sender)(void *);
+
+    void (CDECL *log)(size_t, void *, uint8_t, RustStr);
 };
 
 struct AtriManager {
     void *manager_ptr;
     size_t handle;
 
-    void *(*get_fun)(uint16_t);
+    void *(CDECL *get_fun)(uint16_t);
 };
 
 AtriManager ATRI_MANAGER;
@@ -211,7 +290,7 @@ size_t get_plugin_handle() {
     return ATRI_MANAGER.handle;
 }
 
-ATRI_EXPORT void atri_manager_init(AtriManager manager) {
+ATRI_EXPORT void CDECL atri_manager_init(AtriManager manager) {
     ATRI_MANAGER = manager;
 
     // listener
@@ -220,89 +299,89 @@ ATRI_EXPORT void atri_manager_init(AtriManager manager) {
     ATRI_VTABLE.new_listener_closure = reinterpret_cast<RustManaged (*)(bool, FFIHandler,
                                                                         uint8_t)>(manager.get_fun(151));
     // event
-    ATRI_VTABLE.event_intercept = reinterpret_cast<void (*)(const void *)>(manager.get_fun(200));
-    ATRI_VTABLE.event_is_intercepted = reinterpret_cast<bool (*)(const void *)>(manager.get_fun(201));
+    ATRI_VTABLE.event_intercept = reinterpret_cast<void (*)(void *)>(manager.get_fun(200));
+    ATRI_VTABLE.event_is_intercepted = reinterpret_cast<bool (*)(void *)>(manager.get_fun(201));
 
     // group
-    ATRI_VTABLE.group_get_id = reinterpret_cast<int64_t (*)(const void *)>(manager.get_fun(400));
+    ATRI_VTABLE.group_get_id = reinterpret_cast<int64_t (*)(AtriHandle)>(manager.get_fun(400));
+    ATRI_VTABLE.group_clone = reinterpret_cast<AtriHandle (*)(AtriHandle)>(manager.get_fun(420));
+    ATRI_VTABLE.group_drop = reinterpret_cast<void (*)(AtriHandle)>(manager.get_fun(421));
 
     // group_message_event
-    ATRI_VTABLE.group_message_event_get_group = reinterpret_cast<RustManagedCloneable (*)(
-            const void *)>(manager.get_fun(10000));
+    ATRI_VTABLE.group_message_event_get_group = reinterpret_cast<AtriPHandle (*)(
+            void *)>(manager.get_fun(10000));
     ATRI_VTABLE.group_message_event_get_message = reinterpret_cast<FFIMessageChain (*)(
-            const void *)>(manager.get_fun(10001));
+            void *)>(manager.get_fun(10001));
     ATRI_VTABLE.group_message_event_get_sender = reinterpret_cast<FFIMember (*)(
-            const void *)>(manager.get_fun(10002));
+            void *)>(manager.get_fun(10002));
 
-    ATRI_VTABLE.log = reinterpret_cast<void (*)(size_t, const void *, uint8_t, RustStr)>(manager.get_fun(20000));
+    ATRI_VTABLE.log = reinterpret_cast<void (*)(size_t, void *, uint8_t, RustStr)>(manager.get_fun(20000));
 }
 
-#define ATRI_PLUGIN(class) \
-void *new_fn() {           \
+#define ATRI_PLUGIN(class, name) \
+void * CDECL new_fn() {           \
 return new class();        \
 }                          \
-void enable_fn(void *plug) { \
+void CDECL enable_fn(void *plug) { \
 reinterpret_cast<class *>(plug)->_safe_enable(); \
 }                          \
-void disable_fn(void *plug) {\
+void CDECL disable_fn(void *plug) {\
 reinterpret_cast<class *>(plug)->_safe_disable();\
 }                          \
-void drop_fn(void *plug) { \
+void CDECL drop_fn(void *plug) { \
 delete reinterpret_cast<class *>(plug);    \
 }                          \
-ATRI_EXPORT PluginInstance on_init() {     \
-auto plug = new class();   \
-                           \
+ATRI_EXPORT PluginInstance CDECL on_init() {     \
 return PluginInstance {    \
-RustManaged {              \
-plug, drop_fn                           \
-}, true, PluginVTable {new_fn,enable_fn,disable_fn}, \
-from_u8str(plug->name())\
+1, PluginVTable {new_fn,enable_fn,disable_fn, drop_fn}, ATRI_PLUGIN_ABI_VERSION, \
+from_u8str(name)\
 };\
 }
 
 struct PluginVTable {
-    void *(*new_fn)();
+    void *(CDECL *new_fn)();
 
-    void (*enable)(void *);
+    void (CDECL *enable)(void *);
 
-    void (*disable)(void *);
+    void (CDECL *disable)(void *);
+
+    void (CDECL *drop)(void *);
 };
 
 struct PluginInstance {
-    RustManaged instance;
-    bool should_drop;
+    uint8_t should_drop;
     PluginVTable vtb;
+    uint8_t abi_ver;
     RustStr name;
 };
 
 namespace logger {
-    static void log(const char8_t *str, int level) {
+    static void log(const char *str, int level) {
         ATRI_VTABLE.log(get_plugin_handle(), get_plugin_manager(), level, from_u8str(str));
     }
 
-    void trace(const char8_t *str) {
+    void trace(const char *str) {
         log(str, 0);
     }
 
-    void debug(const char8_t *str) {
+    void debug(const char *str) {
         log(str, 1);
     }
 
-    void info(const char8_t *str) {
+    void info(const char *str) {
         log(str, 2);
     }
 
-    void warn(const char8_t *str) {
+    void warn(const char *str) {
         log(str, 3);
     }
 
-    void error(const char8_t *str) {
+    void error(const char *str) {
         log(str, 4);
     }
 }
 
-namespace Atri {
+inline namespace atri {
     class Plugin {
     public:
         explicit Plugin() = default;
@@ -310,8 +389,6 @@ namespace Atri {
         virtual ~Plugin() = default;
 
     public:
-        virtual const char8_t *name() = 0;
-
         virtual void enable() = 0;
 
         virtual void disable() = 0;
@@ -321,7 +398,7 @@ namespace Atri {
             try {
                 enable();
             } catch (std::exception &e) {
-                logger::error((const char8_t *) e.what());
+                logger::error(e.what());
             }
         }
 
@@ -329,22 +406,9 @@ namespace Atri {
             try {
                 disable();
             } catch (std::exception &e) {
-                logger::error((const char8_t *) e.what());
+                logger::error(e.what());
             }
         }
-    };
-
-    class result : public std::exception {
-    public:
-        result() = default;
-
-    public:
-        [[nodiscard]] const char *what() const noexcept override {
-            return (const char *) why;
-        }
-
-    private:
-        const char8_t *why = nullptr;
     };
 }
 
@@ -385,20 +449,35 @@ namespace contact {
         virtual int64_t id() = 0;
     };
 
-    class Group : public Contact, public ManagedCloneable {
+    class Group : public Contact {
     public:
-        ~Group() override {
-            logger::info(u8"group drop");
+        ~Group() {
+            if (handle && !is_ref) {
+                ATRI_VTABLE.group_drop(handle.ptr);
+            }
         }
 
-        explicit Group(RustManagedCloneable rs) : ManagedCloneable(rs) {
+        Group(Group &&rhs) noexcept:
+                handle(std::exchange(rhs.handle, {})) {
+
+        }
+
+        explicit Group(AtriHandle handle) : handle({handle}), is_ref(false) {
+
+        }
+
+        explicit Group(AtriPHandle handle) : handle({*handle}), is_ref(true) {
 
         }
 
     public:
         int64_t id() override {
-            return ATRI_VTABLE.group_get_id(pointer);
+            return ATRI_VTABLE.group_get_id(handle.valid_handle());
         }
+
+    private:
+        AtriHandleWrapper handle;
+        bool is_ref;
     };
 
     class Member : public Contact {
@@ -435,7 +514,7 @@ namespace event {
         virtual ~Event() = default;
 
     public:
-        explicit Event(const void *intercepted) :
+        explicit Event(void *intercepted) :
                 intercepted(intercepted) {
 
         }
@@ -450,12 +529,12 @@ namespace event {
         }
 
     private:
-        const void *intercepted;
+        void *intercepted;
     };
 
     class MessageEvent : public Event {
     public:
-        explicit MessageEvent(const void *intercepted) : Event(intercepted) {
+        explicit MessageEvent(void *intercepted) : Event(intercepted) {
 
         }
 
@@ -480,14 +559,14 @@ namespace event {
 
     public:
         contact::Group group() {
-            RustManagedCloneable rs = ATRI_VTABLE.group_message_event_get_group(pointer);
-            return contact::Group(rs);
+            AtriPHandle pHandle = ATRI_VTABLE.group_message_event_get_group(pointer);
+            return contact::Group(pHandle);
         }
 
         contact::Contact *contact() override {
-            RustManagedCloneable rs = ATRI_VTABLE.group_message_event_get_group(pointer);
+            AtriPHandle pHandle = ATRI_VTABLE.group_message_event_get_group(pointer);
 
-            return new contact::Group(rs);
+            return new contact::Group(pHandle);
         }
 
         contact::Contact *sender() override {
@@ -500,7 +579,7 @@ namespace event {
         }
     };
 
-    class FriendMessageEvent : public MessageEvent, public ManagedCloneable {
+    /*class FriendMessageEvent : public MessageEvent, public ManagedCloneable {
     public:
         explicit FriendMessageEvent(FFIEvent e) : MessageEvent(e.intercepted), ManagedCloneable(e.base) {
 
@@ -514,7 +593,7 @@ namespace event {
         contact::Contact *sender() override {
             return new contact::Group({});
         }
-    };
+    };*/
 
     class ListenerGuard : Managed {
     public:
@@ -547,15 +626,14 @@ namespace event {
         template<class E>
         static ListenerGuard *listening_on(std::function<bool(E *)> fn) {
             static_assert(std::is_convertible<E *, Event *>());
-            auto new_fn = new std::function<bool(FFIEvent)>;
-            *new_fn = [fn](FFIEvent ffi) -> bool {
+            auto new_fn = new std::function<bool(FFIEvent)>([fn](FFIEvent ffi) -> bool {
                 Event *e;
 
                 switch (ffi.type) {
-                    case 0:
+                    case CLIENT_LOGIN:
                         e = new ClientLoginEvent(ffi);
                         break;
-                    case 1:
+                    case GROUP_MESSAGE:
                         e = new GroupMessageEvent(ffi);
                         break;
 
@@ -575,11 +653,11 @@ namespace event {
                     delete need;
                     return ret;
                 } catch (std::exception &e) {
-                    logger::error((const char8_t *) e.what());
+                    logger::error(e.what());
 
                     return false;
                 }
-            };
+            });
 
             RustManaged ma = ATRI_VTABLE.new_listener_closure(true, {{new_fn, drop_closure}, handle}, 0);
             return new ListenerGuard(ma);

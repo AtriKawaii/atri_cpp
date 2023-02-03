@@ -14,10 +14,15 @@ my_plugin/
 
 CMakeList.txt: 
 ```cmake
-cmake_minimum_required(VERSION 3.24)
-project(my_plugin)
+cmake_minimum_required(VERSION 3.21)
+project(my_plugin LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20) # 由于使用u8str, 最低需要C++20
+set(CMAKE_CXX_STANDARD 11) # 17/20
+set(BUILD_USE_64BITS on)
+
+if(MSVC)
+    add_compile_options(/utf-8) # 使用utf8进行编译
+endif(MSVC)
 
 add_library(my_plugin SHARED plugin.cpp)
 ```
@@ -47,11 +52,11 @@ public:
 
             return true;
         });
-        logger::info(u8"插件已启动");
+        logger::info("插件已启动");
     }
 
     void disable() override {
-        logger::info(u8"插件禁用");
+        logger::info("插件禁用");
     }
 
 private:
